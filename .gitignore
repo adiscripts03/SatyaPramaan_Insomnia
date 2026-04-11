@@ -1,0 +1,6 @@
+.runtime/
+backend.log
+backend.err.log
+frontend.log
+frontend.err.log
+start-digisecure.ps1
