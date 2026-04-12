@@ -40,7 +40,7 @@ const NAV_ITEMS = [
 ]
 
 const VERIFY_RESULT_STORAGE_KEY = "digisecure_last_verification_result"
-const DASHBOARD_DEMO_VIDEO_URL = "https://www.youtube.com/embed/Gv1BZTh2wZ8?si=HKOWOoIQYJ9K_lhH"
+const DASHBOARD_DEMO_VIDEO_URL = "https://www.youtube.com/embed/G1gHbNcAPPE?si=oN5ZzKFnQWyLWEni"
 let lastUploadedVerificationFile = null
 
 function buildResultUrl({ jobId = null, attemptId = null, resultToken = null } = {}) {
