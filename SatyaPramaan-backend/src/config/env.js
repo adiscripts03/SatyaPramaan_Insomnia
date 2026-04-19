@@ -57,6 +57,13 @@ const envSchema = z.object({
   VISUAL_DIFF_MIN_CHANGED_SENSITIVE_OPS: z.coerce.number().int().nonnegative().default(8),
   VISUAL_RENDER_SCALE: z.coerce.number().positive().default(1.5),
   VISUAL_DIFF_TIMEOUT_MS: z.coerce.number().int().positive().default(12000),
+  AI_EXPLANATION_ENABLED: booleanEnv.default(false),
+  AI_PROVIDER: z.enum(["openai", "openai_compatible", "gemini"]).default("openai_compatible"),
+  AI_API_KEY: z.string().optional().default(""),
+  AI_MODEL: z.string().min(1).default("gpt-4.1-mini"),
+  AI_BASE_URL: z.string().optional().default(""),
+  AI_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  AI_MAX_SUMMARY_CHARS: z.coerce.number().int().positive().default(280),
   LOG_LEVEL: z.string().default("debug")
 });
 

@@ -10,5 +10,6 @@ router.get("/tenants", controller.listTenants);
 router.post("/users/:userId/suspend", controller.suspendUser);
 router.post("/recompute-trust/:issuerUserId", controller.recomputeTrust);
 router.post("/cache/flush-document/:documentId", controller.flushDocumentCache);
+router.get("/ai/health", controller.aiProviderHealth);
 
 module.exports = router;

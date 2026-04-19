@@ -165,7 +165,8 @@ const verifyQr = asyncHandler(async (req, res) => {
     qrPayload: req.validated.body,
     ip: req.ip,
     userAgent: req.headers["user-agent"] || null,
-    verifierUserId: req.auth?.userId || null
+    verifierUserId: req.auth?.userId || null,
+    uiLanguage: req.headers["x-ui-language"] || "en"
   });
   res.json({ data });
 });

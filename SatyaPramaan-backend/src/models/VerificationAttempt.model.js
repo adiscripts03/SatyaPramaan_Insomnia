@@ -30,6 +30,7 @@ const VerificationAttemptSchema = new Schema(
     signatureVerification: { type: Schema.Types.Mixed, default: null },
     contentComparison: { type: Schema.Types.Mixed, default: null },
     tamperFindings: { type: Schema.Types.Mixed, default: null },
+    aiExplanation: { type: Schema.Types.Mixed, default: null },
     trustScoreDelta: { type: Schema.Types.Mixed, default: null },
     asyncJobId: { type: String, default: null },
     publicResultTokenHash: { type: String, default: null, index: true }

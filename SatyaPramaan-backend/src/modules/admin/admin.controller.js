@@ -21,9 +21,15 @@ const flushDocumentCache = asyncHandler(async (req, res) => {
   res.json({ data });
 });
 
+const aiProviderHealth = asyncHandler(async (req, res) => {
+  const data = await adminService.getAiProviderHealth();
+  res.json({ data });
+});
+
 module.exports = {
   listTenants,
   suspendUser,
   recomputeTrust,
-  flushDocumentCache
+  flushDocumentCache,
+  aiProviderHealth
 };

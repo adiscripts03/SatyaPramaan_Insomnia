@@ -260,6 +260,7 @@ function mapAttemptToResultPayload(attempt) {
       detectors,
       visualDiffScoreByPage,
       ocrDiffSummary,
+      aiExplanation: attempt.aiExplanation || null,
       tamperFindings: includeTamperFindings ? (attempt.tamperFindings || null) : null,
     },
   }
@@ -1997,6 +1998,10 @@ function VerificationResultPage() {
     changedPages: [],
     confidence: null,
   }
+  const textChanges = Array.isArray(result.tamperFindings?.textChanges) ? result.tamperFindings.textChanges : []
+  const textChangesTruncatedCount = Number(result.tamperFindings?.textChangesTruncatedCount || 0)
+  const aiWindowTextChanges = textChanges.slice(0, 8)
+  const visualInkFindings = result.tamperFindings?.visualInkFindings || null
   const visualDiffScoreByPage = result.visualDiffScoreByPage || result.tamperFindings?.visualDiffScoreByPage || []
   const visualFlaggedPages = shouldShowTamperWarnings
     ? (result.tamperFindings?.visualChangedPages || visualDiffScoreByPage
@@ -2067,6 +2072,7 @@ function VerificationResultPage() {
     result.trustBand ||
     (typeof result.trustScore === "object" && result.trustScore !== null ? result.trustScore.scoreBand : null) ||
     t("Band unavailable")
+  const aiExplanation = result.aiExplanation || payload.attempt?.aiExplanation || null
   const rectanglesByPage = result.tamperFindings?.rectanglesByPage || {}
   const tamperPages = [
     ...Object.keys(rectanglesByPage).map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0),
@@ -2098,6 +2104,95 @@ function VerificationResultPage() {
           </div>
         </dl>
       </section>
+
+      {aiExplanation ? (
+        <section className="card ai-insight-mini-window">
+          <div className="ai-insight-head">
+            <h3>{t("AI Insight (Advisory)")}</h3>
+            <span className="ai-insight-confidence">{t("Confidence")}: {formatAsPercent(aiExplanation.confidence, 0)}</span>
+          </div>
+          <p>{aiExplanation.summary || t("No AI summary available")}</p>
+          <div className="ai-insight-metrics-grid">
+            <article className="ai-insight-metric-item">
+              <small>{t("Reason Code")}</small>
+              <strong>{result.reasonCode || result.resultReasonCode || "-"}</strong>
+            </article>
+            <article className="ai-insight-metric-item">
+              <small>{t("OCR changed words")}</small>
+              <strong>{ocrDiffSummary.changedWordCount || 0}</strong>
+            </article>
+            <article className="ai-insight-metric-item">
+              <small>{t("OCR confidence")}</small>
+              <strong>{formatAsPercent(ocrDiffSummary.confidence, 0)}</strong>
+            </article>
+            <article className="ai-insight-metric-item">
+              <small>{t("Visual diff peak")}</small>
+              <strong>{visualPeakPercent}%</strong>
+            </article>
+          </div>
+          <div className="detector-chip-row">
+            <DetectorChip label={t("Text Layer")} active={detectors.textLayerChanged} />
+            <DetectorChip label={t("OCR Layer")} active={detectors.ocrLayerChanged} />
+            <DetectorChip label={t("Visual Layer")} active={detectors.visualLayerChanged} />
+          </div>
+          {Array.isArray(aiExplanation.keyFindings) && aiExplanation.keyFindings.length ? (
+            <details className="ai-insight-details">
+              <summary>{t("AI Key Findings")}</summary>
+              <ul className="check-list ai-insight-list">
+                {aiExplanation.keyFindings.map((finding, index) => (
+                  <li key={`${finding}-${index}`}>{finding}</li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+          {aiWindowTextChanges.length ? (
+            <details className="ai-insight-details">
+              <summary>{t("Detected Text Replacements")}</summary>
+              <div className="ai-insight-scroll-area">
+                <ul className="text-change-list">
+                  {aiWindowTextChanges.map((change, index) => {
+                    const fromText = change?.fromText || "-"
+                    const toText = change?.toText || "-"
+                    const pages = Array.isArray(change?.pages) && change.pages.length
+                      ? change.pages.join(", ")
+                      : "-"
+
+                    return (
+                      <li key={`ai-text-change-${index}`} className="text-change-item">
+                        <p><strong>{fromText}</strong> {" -> "} <strong>{toText}</strong></p>
+                        <small>{t("Pages")}: {pages}</small>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+              {textChanges.length > aiWindowTextChanges.length ? (
+                <p className="inline-note">{textChanges.length - aiWindowTextChanges.length} {t("additional changes not shown")}</p>
+              ) : null}
+            </details>
+          ) : null}
+          {visualInkFindings?.lineLikeDetected || visualInkFindings?.scribbleLikeDetected ? (
+            <details className="ai-insight-details">
+              <summary>{t("Detected Visual Marks")}</summary>
+              <ul className="text-change-list">
+                {visualInkFindings?.lineLikeDetected ? (
+                  <li className="text-change-item">
+                    <p><strong>{t("Random line marks detected")}</strong></p>
+                    <small>{t("Pages")}: {(visualInkFindings?.lineLikePages || []).join(", ") || "-"}</small>
+                  </li>
+                ) : null}
+                {visualInkFindings?.scribbleLikeDetected ? (
+                  <li className="text-change-item">
+                    <p><strong>{t("Pen scribble marks detected")}</strong></p>
+                    <small>{t("Pages")}: {(visualInkFindings?.scribbleLikePages || []).join(", ") || "-"}</small>
+                  </li>
+                ) : null}
+              </ul>
+            </details>
+          ) : null}
+          <p className="inline-note">{aiExplanation.disclaimer || t("AI output is advisory only.")}</p>
+        </section>
+      ) : null}
 
       <section className="result-grid">
         <div className="stacked-panel">
@@ -2132,21 +2227,6 @@ function VerificationResultPage() {
             <p className="score-big">{trustScoreValue}</p>
             <p>{trustBandValue}</p>
             <p>{t("Score impact: +successful verifications, -tamper incidents")}</p>
-          </article>
-
-          <article className="card">
-            <h3>{t("Verification Findings")}</h3>
-            <ul className="check-list">
-              <li>{t("Reason Code")}: <strong>{result.reasonCode || result.resultReasonCode || "-"}</strong></li>
-              <li>{t("OCR changed words")}: <strong>{ocrDiffSummary.changedWordCount || 0}</strong></li>
-              <li>{t("OCR confidence")}: <strong>{formatAsPercent(ocrDiffSummary.confidence, 0)}</strong></li>
-              <li>{t("Visual diff peak")}: <strong>{visualPeakPercent}%</strong></li>
-            </ul>
-            <div className="detector-chip-row">
-              <DetectorChip label={t("Text Layer")} active={detectors.textLayerChanged} />
-              <DetectorChip label={t("OCR Layer")} active={detectors.ocrLayerChanged} />
-              <DetectorChip label={t("Visual Layer")} active={detectors.visualLayerChanged} />
-            </div>
           </article>
 
           <article className="card">

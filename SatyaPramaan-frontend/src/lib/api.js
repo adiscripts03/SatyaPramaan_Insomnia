@@ -1,7 +1,19 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:4000/api/v1").replace(/\/$/, "")
 
+function getUiLanguageHeader() {
+  if (typeof window === "undefined") {
+    return "en"
+  }
+
+  const language = window.localStorage.getItem("satyapramaan_language") || "en"
+  return language === "hi" ? "hi" : "en"
+}
+
 function buildHeaders({ token, contentType, extraHeaders = {} }) {
-  const headers = { ...extraHeaders }
+  const headers = {
+    "X-UI-Language": getUiLanguageHeader(),
+    ...extraHeaders,
+  }
 
   if (contentType) {
     headers["Content-Type"] = contentType

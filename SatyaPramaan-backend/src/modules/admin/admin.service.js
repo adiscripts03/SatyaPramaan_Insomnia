@@ -4,6 +4,7 @@ const { invalidateIssuerProfile } = require("../../cache/issuerCache");
 const { invalidateDocumentSnapshot } = require("../../cache/documentSnapshotCache");
 const { appendAuditEntry } = require("../audit-ledger/auditLedger.service");
 const { recomputeTrustScore } = require("../trust-score/trustScore.service");
+const { checkAiProviderHealth } = require("../verification/aiExplanation.service");
 const { AppError } = require("../../utils/AppError");
 
 async function suspendUser(userId) {
@@ -90,9 +91,14 @@ async function listTenants({ limit = 100 } = {}) {
   }));
 }
 
+async function getAiProviderHealth() {
+  return checkAiProviderHealth();
+}
+
 module.exports = {
   listTenants,
   suspendUser,
   recomputeIssuerTrust,
-  flushDocumentCache
+  flushDocumentCache,
+  getAiProviderHealth
 };

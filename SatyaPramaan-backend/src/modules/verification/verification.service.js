@@ -31,10 +31,13 @@ const {
 const { AppError } = require("../../utils/AppError");
 const { diffArrays } = require("diff");
 const { extractOcrLayer, compareOcrLayers } = require("./ocr.service");
+const { generateVerificationAiExplanation } = require("./aiExplanation.service");
 
 const ASYNC_UPLOAD_SIZE_THRESHOLD_BYTES = 5 * 1024 * 1024;
 const DETECTOR_ASYNC_SIZE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 const VERIFICATION_DECISION_VERSION = 3;
+const MAX_TEXT_CHANGE_DETAILS = 20;
+const MAX_TEXT_CHANGE_TOKENS = 8;
 
 function withTimeout(promise, timeoutMs, timeoutMessage) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -208,6 +211,7 @@ function resolveUploadRequestContext(req) {
   const body = req.validated?.body || req.body || {};
   const qrPayload = parseQrPayloadInput(body.qrPayload);
   const documentId = body.documentId || qrPayload?.documentId;
+  const uiLanguage = req.headers["x-ui-language"] || "en";
   const verifierUserId = req.auth?.userId || null;
   const file = req.file;
 
@@ -231,6 +235,7 @@ function resolveUploadRequestContext(req) {
     body,
     qrPayload,
     documentId,
+    uiLanguage,
     auth: req.auth || null,
     verifierUserId,
     file,
@@ -537,6 +542,193 @@ function compareWordStreams(originalWords, candidateWords) {
   };
 }
 
+function joinWordSlice(words = [], maxTokens = MAX_TEXT_CHANGE_TOKENS) {
+  if (!Array.isArray(words) || words.length === 0) {
+    return "";
+  }
+
+  const limited = words.slice(0, maxTokens);
+  const joined = limited
+    .map((word) => String(word?.text || word?.normalizedText || "").trim())
+    .filter((value) => value.length > 0)
+    .join(" ")
+    .trim();
+
+  if (!joined) {
+    return "";
+  }
+
+  if (words.length > maxTokens) {
+    return `${joined} ...`;
+  }
+
+  return joined;
+}
+
+function buildTextChangeDetails(originalWords, candidateWords, {
+  maxItems = MAX_TEXT_CHANGE_DETAILS,
+  maxTokens = MAX_TEXT_CHANGE_TOKENS
+} = {}) {
+  const originalTokens = originalWords.map((word) => word.normalizedText);
+  const candidateTokens = candidateWords.map((word) => word.normalizedText);
+  const chunks = diffArrays(originalTokens, candidateTokens);
+  const operations = [];
+
+  let originalCursor = 0;
+  let candidateCursor = 0;
+  let pendingRemoved = null;
+
+  for (const chunk of chunks) {
+    const valuesLength = Array.isArray(chunk.value) ? chunk.value.length : 0;
+
+    if (chunk.removed) {
+      const removedWords = originalWords.slice(originalCursor, originalCursor + valuesLength);
+      originalCursor += valuesLength;
+
+      if (pendingRemoved) {
+        pendingRemoved.removedWords.push(...removedWords);
+      } else {
+        pendingRemoved = {
+          removedWords: [...removedWords],
+          addedWords: []
+        };
+      }
+
+      continue;
+    }
+
+    if (chunk.added) {
+      const addedWords = candidateWords.slice(candidateCursor, candidateCursor + valuesLength);
+      candidateCursor += valuesLength;
+
+      if (pendingRemoved) {
+        pendingRemoved.addedWords.push(...addedWords);
+        operations.push(pendingRemoved);
+        pendingRemoved = null;
+      } else {
+        operations.push({
+          removedWords: [],
+          addedWords: [...addedWords]
+        });
+      }
+
+      continue;
+    }
+
+    if (pendingRemoved) {
+      operations.push(pendingRemoved);
+      pendingRemoved = null;
+    }
+
+    originalCursor += valuesLength;
+    candidateCursor += valuesLength;
+  }
+
+  if (pendingRemoved) {
+    operations.push(pendingRemoved);
+  }
+
+  const details = operations
+    .map((operation) => {
+      const removedWords = Array.isArray(operation.removedWords) ? operation.removedWords : [];
+      const addedWords = Array.isArray(operation.addedWords) ? operation.addedWords : [];
+      const fromText = joinWordSlice(removedWords, maxTokens);
+      const toText = joinWordSlice(addedWords, maxTokens);
+      const pages = [...new Set([...removedWords, ...addedWords]
+        .map((word) => Number(word?.pageNumber))
+        .filter((value) => Number.isFinite(value) && value > 0))]
+        .sort((left, right) => left - right);
+
+      if (!fromText && !toText) {
+        return null;
+      }
+
+      return {
+        changeType: fromText && toText ? "replaced" : fromText ? "removed" : "added",
+        fromText: fromText || null,
+        toText: toText || null,
+        pages
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    details: details.slice(0, maxItems),
+    truncatedCount: Math.max(0, details.length - maxItems)
+  };
+}
+
+function collectVisualInkFindings(visualRectanglesByPage = {}, visualChangedPages = []) {
+  const lineLikePages = new Set();
+  const scribblePages = new Set();
+  let lineLikeCount = 0;
+  let scribbleLikeCount = 0;
+
+  for (const [pageKey, rectangles] of Object.entries(visualRectanglesByPage || {})) {
+    const pageNumber = Number(pageKey);
+    if (!Number.isFinite(pageNumber) || pageNumber <= 0) {
+      continue;
+    }
+
+    let pageLineLike = 0;
+    let pageScribbleLike = 0;
+
+    for (const rectangle of Array.isArray(rectangles) ? rectangles : []) {
+      const width = Math.max(0, Number(rectangle?.width) || 0);
+      const height = Math.max(0, Number(rectangle?.height) || 0);
+
+      if (!width || !height) {
+        continue;
+      }
+
+      const longer = Math.max(width, height);
+      const shorter = Math.max(1, Math.min(width, height));
+      const aspectRatio = longer / shorter;
+      const area = width * height;
+
+      // Long thin rectangles often represent random lines drawn over the PDF.
+      if (aspectRatio >= 8 && longer >= 45) {
+        pageLineLike += 1;
+        lineLikeCount += 1;
+        continue;
+      }
+
+      // Small-medium irregular regions commonly map to pen scribbles/signature-like marks.
+      if (aspectRatio < 6 && area >= 40 && area <= 28000 && longer <= 260) {
+        pageScribbleLike += 1;
+        scribbleLikeCount += 1;
+      }
+    }
+
+    if (pageLineLike > 0) {
+      lineLikePages.add(pageNumber);
+    }
+
+    if (pageScribbleLike >= 2 || (pageScribbleLike >= 1 && pageLineLike === 0)) {
+      scribblePages.add(pageNumber);
+    }
+  }
+
+  // Fallback: if visual changes exist but no rectangles are extracted, retain page-level signal.
+  if (!lineLikePages.size && !scribblePages.size) {
+    for (const pageNumber of Array.isArray(visualChangedPages) ? visualChangedPages : []) {
+      const numericPage = Number(pageNumber);
+      if (Number.isFinite(numericPage) && numericPage > 0) {
+        scribblePages.add(numericPage);
+      }
+    }
+  }
+
+  return {
+    lineLikeDetected: lineLikePages.size > 0,
+    scribbleLikeDetected: scribblePages.size > 0,
+    lineLikeCount,
+    scribbleLikeCount,
+    lineLikePages: [...lineLikePages].sort((left, right) => left - right),
+    scribbleLikePages: [...scribblePages].sort((left, right) => left - right)
+  };
+}
+
 function buildUploadBodyFromDocument(document) {
   return {
     title: document.title,
@@ -650,7 +842,7 @@ async function createVerificationAttempt(payload) {
   return VerificationAttempt.create(payload);
 }
 
-async function verifyQrPayload({ qrPayload, ip, userAgent, verifierUserId = null }) {
+async function verifyQrPayload({ qrPayload, ip, userAgent, verifierUserId = null, uiLanguage = "en" }) {
   const isAnonymous = !verifierUserId;
   const resultAccessToken = isAnonymous ? createResultAccessToken() : null;
   const publicResultTokenHash = hashResultToken(resultAccessToken);
@@ -721,6 +913,24 @@ async function verifyQrPayload({ qrPayload, ip, userAgent, verifierUserId = null
   }
 
   const trustSummary = snapshot.issuerUserId ? await getTrustScore(snapshot.issuerUserId) : null;
+  const aiExplanation = await generateVerificationAiExplanation({
+    method: "qr",
+    uiLanguage,
+    resultStatus,
+    resultReasonCode,
+    resultMessage,
+    documentId: snapshot.documentId,
+    detectors: getDefaultDetectors(),
+    changedWordCount: 0,
+    changedPages: [],
+    ocrDiffSummary: getDefaultOcrDiffSummary(),
+    summarySignals: [
+      `QR signature valid: ${String(qrSignatureValid)}`,
+      `Token match: ${String(snapshot.verificationToken === qrPayload.verificationToken)}`,
+      `Content hash match: ${String(snapshot.canonicalContentHash === qrPayload.contentHash)}`,
+      `Document status: ${String(snapshot.status || "unknown")}`
+    ]
+  });
   const completedAt = new Date();
   const attempt = await createVerificationAttempt({
     attemptId: uuidv4(),
@@ -740,6 +950,7 @@ async function verifyQrPayload({ qrPayload, ip, userAgent, verifierUserId = null
     qrPayloadReceived: qrPayload,
     anonymousSessionId,
     publicResultTokenHash,
+    aiExplanation,
     signatureVerification: {
       signatureValid: qrSignatureValid,
       expectedKeyFingerprint: snapshot.signingKeyFingerprint,
@@ -776,7 +987,8 @@ async function verifyQrPayload({ qrPayload, ip, userAgent, verifierUserId = null
       reason: resultMessage,
       documentId: snapshot.documentId,
       issuerInstitutionName: snapshot.issuerInstitutionName,
-      trustScore: trustSummary
+      trustScore: trustSummary,
+      aiExplanation
     },
     ...(resultAccessToken ? { resultAccessToken } : {})
   };
@@ -788,6 +1000,7 @@ async function performUploadVerification(req, context = null) {
     body,
     qrPayload,
     documentId,
+    uiLanguage,
     verifierUserId,
     file,
     uploadedFileHash,
@@ -1030,8 +1243,10 @@ async function performUploadVerification(req, context = null) {
   }
 
   const changedWords = [...streamDiff.changedOriginal, ...streamDiff.changedCandidate];
+  const textChangeDetails = buildTextChangeDetails(originalWords, candidateWords);
   const textRectanglesByPage = mapChangedWordsToRectangles(changedWords);
   const rectanglesByPage = mergeRectanglesByPage(textRectanglesByPage, visualRectanglesByPage);
+  const visualInkFindings = collectVisualInkFindings(visualRectanglesByPage, visualChangedPages);
   const tamperFindings = {
     changedWordCount: changedWords.length,
     changedPages: mergedChangedPages,
@@ -1041,9 +1256,25 @@ async function performUploadVerification(req, context = null) {
     visualRectanglesByPage,
     ocrDiffSummary,
     visualChangedPages,
+    visualInkFindings,
+    textChanges: textChangeDetails.details,
+    textChangesTruncatedCount: textChangeDetails.truncatedCount,
     summary: [
       ...(!pageCountMatch ? ["Page count mismatch"] : []),
       ...(detectors.textLayerChanged ? ["Text token differences detected"] : []),
+      ...textChangeDetails.details.slice(0, 2).map((change) => {
+        const fromText = change.fromText || "[empty]";
+        const toText = change.toText || "[empty]";
+
+        return `Text changed: "${fromText}" -> "${toText}"`;
+      }),
+      ...(textChangeDetails.truncatedCount > 0 ? [`${textChangeDetails.truncatedCount} additional text changes were omitted`] : []),
+      ...(visualInkFindings.lineLikeDetected
+        ? [`Potential random line marks detected on page(s): ${visualInkFindings.lineLikePages.join(", ")}`]
+        : []),
+      ...(visualInkFindings.scribbleLikeDetected
+        ? [`Potential pen scribble marks detected on page(s): ${visualInkFindings.scribbleLikePages.join(", ")}`]
+        : []),
       ...(detectors.ocrLayerChanged ? ["OCR layer differences detected"] : []),
       ...(detectors.visualLayerChanged ? ["Visual layer differences exceeded threshold"] : []),
       ...(!canonicalHashMatch ? ["Canonical content hash mismatch"] : []),
@@ -1054,6 +1285,19 @@ async function performUploadVerification(req, context = null) {
       ...(visualDetectorError ? [`Visual detector fallback: ${visualDetectorError}`] : [])
     ]
   };
+  const aiExplanation = await generateVerificationAiExplanation({
+    method: "upload",
+    uiLanguage,
+    resultStatus,
+    resultReasonCode,
+    resultMessage,
+    documentId: snapshot.documentId,
+    detectors,
+    changedWordCount: tamperFindings.changedWordCount,
+    changedPages: tamperFindings.changedPages,
+    ocrDiffSummary,
+    summarySignals: tamperFindings.summary
+  });
 
   const completedAt = new Date();
   const attempt = await createVerificationAttempt({
@@ -1088,7 +1332,8 @@ async function performUploadVerification(req, context = null) {
       visualBaselineAvailable,
       detectors
     },
-    tamperFindings
+    tamperFindings,
+    aiExplanation
   });
 
   await Promise.all([
@@ -1140,7 +1385,8 @@ async function performUploadVerification(req, context = null) {
       detectors,
       visualDiffScoreByPage,
       ocrDiffSummary,
-      tamperFindings: resultStatus === "tampered" || resultStatus === "suspicious" ? tamperFindings : null
+      tamperFindings: resultStatus === "tampered" || resultStatus === "suspicious" ? tamperFindings : null,
+      aiExplanation
     },
     ...(resultAccessToken ? { resultAccessToken } : {})
   };
